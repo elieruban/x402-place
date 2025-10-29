@@ -1,0 +1,56 @@
+# Worker Service Dockerfile
+# Build from repository root: docker build -f Dockerfile.worker -t x402place-worker .
+
+# Base stage
+FROM node:20-alpine AS base
+RUN npm install -g pnpm
+WORKDIR /app
+
+# Builder stage
+FROM base AS builder
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/worker/package.json ./packages/worker/
+COPY packages/shared/package.json ./packages/shared/
+
+# Install dependencies first (this creates the workspace symlinks)
+RUN pnpm install --frozen-lockfile
+
+# Now copy source files
+COPY packages/shared/prisma ./packages/shared/prisma
+COPY packages/shared/lib ./packages/shared/lib
+COPY packages/shared/types ./packages/shared/types
+COPY packages/worker/src ./packages/worker/src
+COPY packages/worker/tsconfig.json ./packages/worker/
+COPY tsconfig.json ./
+
+# Generate Prisma Client
+RUN cd packages/shared && pnpm db:generate
+
+# Build TypeScript
+RUN cd packages/worker && pnpm build && ls -la dist
+
+# Production stage
+FROM node:20-alpine AS production
+RUN npm install -g pnpm
+WORKDIR /app
+
+# Copy package files
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/worker/package.json ./packages/worker/
+COPY packages/shared/package.json ./packages/shared/
+
+# Copy Prisma schema (needed before installing deps)
+COPY packages/shared/prisma ./packages/shared/prisma
+
+# Install production dependencies (this will also install @prisma/client)
+RUN pnpm install --frozen-lockfile --prod
+
+# Generate Prisma client in production (using npx to download prisma CLI temporarily)
+RUN cd packages/shared && npx -y prisma@5.20.0 generate
+
+# Copy built worker files (bundled with all dependencies)
+COPY --from=builder /app/packages/worker/dist ./packages/worker/dist
+
+# Start the worker
+CMD ["node", "packages/worker/dist/worker.js"]
+
